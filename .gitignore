@@ -7,9 +7,16 @@ node_modules/
 dist/
 build/
 *.log
-finaloutput/**/*
-logs/**/*
-uploads/**/*
+# Allow .gitkeep files in these directories
+finaloutput/**
+!finaloutput/.gitkeep
+
+logs/**
+!logs/.gitkeep
+
+uploads/**
+!uploads/.gitkeep
 .last_task_id
 .last_transcription_id
 backend/intermediate/**/*
+!backend/intermediate/.gitkeep
