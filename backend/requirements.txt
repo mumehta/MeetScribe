@@ -1,0 +1,19 @@
+# requirements/base.txt
+python-multipart>=0.0.20
+python-dotenv>=1.1.1
+pydantic>=2.11.7
+faster-whisper>=1.2.0
+torch>=2.8.0
+torchcodec>=0.6.0
+requests>=2.32.5
+fastapi>=0.116.1
+uvicorn>=0.35.0
+pydantic-settings>=2.0.0
+pyttsx3>=2.90
+scipy>=1.16.1
+gTTS
+pydub
+torchaudio
+pyannote.audio
+watchdog>=3.0.0
+pathlib

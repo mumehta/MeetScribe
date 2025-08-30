@@ -1,0 +1,15 @@
+.vscode
+.venv
+.env
+.DS_Store
+node_modules/
+*/venv
+dist/
+build/
+*.log
+finaloutput/**/*
+logs/**/*
+uploads/**/*
+.last_task_id
+.last_transcription_id
+backend/intermediate/**/*
