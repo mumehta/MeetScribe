@@ -1,12 +1,35 @@
-.vscode
-.venv
+# Python
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables
 .env
+.venv
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project specific
 node_modules/
-*/venv
 dist/
 build/
 *.log
+
 # Allow .gitkeep files in these directories
 finaloutput/**
 !finaloutput/.gitkeep
@@ -16,7 +39,11 @@ logs/**
 
 uploads/**
 !uploads/.gitkeep
+
+# Project files
 .last_task_id
 .last_transcription_id
+
+# Intermediate files
 backend/intermediate/**/*
 !backend/intermediate/.gitkeep
