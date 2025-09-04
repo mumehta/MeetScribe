@@ -1,0 +1,8 @@
+stages:
+  - test
+
+# Simple placeholder job
+job_success:
+  stage: test
+  script:
+    - echo "✅ Pipeline ran successfully."
