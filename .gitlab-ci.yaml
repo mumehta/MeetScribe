@@ -6,3 +6,5 @@ job_success:
   stage: test
   script:
     - echo "✅ Pipeline ran successfully."
+  tags:
+    - vcv2-dedicated-runner
