@@ -47,3 +47,6 @@ uploads/**
 # Intermediate files
 backend/intermediate/**/*
 !backend/intermediate/.gitkeep
+
+pynode-model/
+recording.m4a

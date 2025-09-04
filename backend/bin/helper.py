@@ -128,7 +128,7 @@ def transcribe_audio(processing_task_id: str,
         f"{api_base_url}/api/v1/transcribe/{processing_task_id}",
         headers=headers,
         params=params,
-        timeout=120  # Increased from 60 to 120 seconds (2 minutes)
+        timeout=300  # Increased to 300 seconds (5 minutes) to handle large jobs
     )
     
     if response.status_code != 200:
@@ -142,10 +142,10 @@ def transcribe_audio(processing_task_id: str,
     
     # Poll for completion
     start_time = time.time()
-    while time.time() - start_time < 600:  # 10 minute timeout
+    while time.time() - start_time < 3600:  # Increased to 60 minutes to handle long transcriptions
         response = requests.get(
             f"{api_base_url}/api/v1/transcribe/{task_id}",
-            timeout=60  # Increased from 30 to 60 seconds
+            timeout=300  # Increased to 300 seconds per poll
         )
         
         if response.status_code != 200:

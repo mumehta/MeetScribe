@@ -1,0 +1,694 @@
+openapi: 3.0.3
+info:
+  title: Meeting Transcriber API
+  version: "0.3.0"
+  contact:
+    name: API Support
+    email: munish.mehta@service.nsw.gov.au
+    url: https://services.nsw.gov.au/
+  description: |
+    API for audio upload/conversion, transcription (with optional speaker diarization), and meeting notes generation via Ollama.
+
+    This version adds macOS-local recording endpoints for default microphone + default output
+    (via Multi-Output device incl. BlackHole). Recording produces local WAV artifacts
+    that can be optionally auto-handed-off to the existing processing pipeline without re-upload.
+
+servers:
+  - url: http://localhost:8000
+    description: Local development server
+
+tags:
+  - name: system
+    description: system tag
+  - name: audio-processing
+    description: audio-processing tag
+  - name: transcription
+    description: transcription tag
+  - name: meeting-notes
+    description: meeting-notes tag
+  - name: recordings
+    description: Local audio recording (macOS default devices)
+
+paths:
+  /:
+    get:
+      summary: Health check
+      description: Health Check
+      operationId: getRoot
+      tags: [system]
+      responses:
+        '200':
+          description: Service status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /api/v1/upload-audio:
+    post:
+      summary: Upload or register audio for conversion to standard WAV (async)
+      description: |
+        Accepts either:
+        - multipart upload of a file, OR
+        - JSON pointing to a **server-local artifact path** (e.g., from recordings)
+
+        Starts an Audio Processing Task that normalizes the input for transcription.
+      operationId: uploadAudio
+      tags: [audio-processing]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServerLocalUploadRequest'
+      responses:
+        '200':
+          description: Upload/registration accepted and processing started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AudioProcessingQueued'
+        '400':
+          description: Invalid input (file missing/unsupported or bad server_local_path)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Server error while saving or registering file
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/audio-processing/{task_id}:
+    get:
+      summary: Get audio processing status
+      description: Get audio processing status
+      operationId: getAudioProcessingStatus
+      tags: [audio-processing]
+      parameters:
+        - in: path
+          name: task_id
+          required: true
+          schema: { type: string }
+          description: Audio processing task ID returned by upload step
+      responses:
+        '200':
+          description: Audio processing task status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AudioProcessingStatus'
+        '404':
+          description: Processing task not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/transcribe/{processing_task_id}:
+    post:
+      summary: Start transcription for a completed audio processing task
+      description: Start transcription for a completed audio processing task
+      operationId: startTranscription
+      tags: [transcription]
+      parameters:
+        - in: path
+          name: processing_task_id
+          required: true
+          schema: { type: string }
+          description: Processing task ID from the upload/convert step
+        - in: query
+          name: whisper_model
+          schema: { type: string }
+          description: Override Whisper model (e.g., small.en, medium.en)
+        - in: query
+          name: compute_type
+          schema: { type: string, example: int8 }
+          description: Override compute type (e.g., int8, float16)
+        - in: query
+          name: use_diarization
+          schema: { type: boolean }
+          description: Override speaker diarization setting
+        - in: header
+          name: X-HuggingFace-Token
+          schema: { type: string }
+          description: Override HuggingFace token
+      responses:
+        '200':
+          description: Transcription task created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TranscriptionQueued'
+        '400':
+          description: Processing task not completed or missing converted audio
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Processing task not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Error starting transcription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    get:
+      summary: Get transcription status/result
+      description: Get transcription status/result
+      operationId: getTranscription
+      tags: [transcription]
+      parameters:
+        - in: path
+          name: processing_task_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Transcription status or final result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TranscriptionStatus'
+        '404':
+          description: Transcription task not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/generate-notes/{task_id}:
+    post:
+      summary: Generate meeting notes from a completed transcription
+      description: Generate meeting notes from a completed transcription
+      operationId: generateNotes
+      tags: [meeting-notes]
+      parameters:
+        - in: path
+          name: task_id
+          required: true
+          schema: { type: string }
+          description: Transcription task ID (must be completed)
+        - in: query
+          name: template
+          schema: { type: string }
+          description: Optional custom template for note generation
+        - in: query
+          name: ollama_model
+          schema: { type: string, example: qwen2:7b-instruct }
+          description: Override Ollama model
+        - in: query
+          name: ollama_base_url
+          schema: { type: string, example: http://localhost:11434 }
+          description: Override Ollama base URL
+      responses:
+        '200':
+          description: Meeting notes generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerateNotesResponse'
+        '400':
+          description: Transcription not completed or invalid transcript
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Transcription task not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Ollama service unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Error generating notes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/ollama/status:
+    get:
+      summary: Check Ollama availability and models
+      description: Check Ollama availability and models
+      operationId: getOllamaStatus
+      tags: [meeting-notes]
+      responses:
+        '200':
+          description: Ollama service status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OllamaStatus'
+
+  # --------------------------
+  # New: Recording (macOS)
+  # --------------------------
+  /api/v1/recordings/status:
+    get:
+      summary: Get current recording status (global)
+      description: Returns global recording state and active recording_task_id if any.
+      operationId: getRecordingStatus
+      tags: [recordings]
+      responses:
+        '200':
+          description: Current recording status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingGlobalStatus'
+
+  /api/v1/recordings/preflight:
+    post:
+      summary: Preflight checks for macOS local recording (default devices)
+      description: Checks presence/config of Multi-Output Device + BlackHole and mic permission.
+      operationId: recordingPreflight
+      tags: [recordings]
+      responses:
+        '200':
+          description: Preflight result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingPreflightResponse'
+        '500':
+          description: Preflight check failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/recordings/start:
+    post:
+      summary: Start local recording (default mic + default output via Multi-Output)
+      description: Starts capture and returns a recording_task_id.
+      operationId: startRecording
+      tags: [recordings]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordingStartRequest'
+      responses:
+        '200':
+          description: Recording started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingStartResponse'
+        '409':
+          description: A recording is already in progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Could not start recording
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/recordings/stop:
+    post:
+      summary: Stop local recording (optional auto-handoff to processing)
+      description: |
+        Stops capture and finalizes artifacts. If `auto_handoff=true`, the server immediately
+        creates an **Audio Processing Task** using the selected artifact (`handoff_artifact`)
+        without re-upload (via server-local path registration).
+      operationId: stopRecording
+      tags: [recordings]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordingStopRequest'
+      responses:
+        '200':
+          description: Recording finalized (and optionally auto-handed-off)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingStopResponse'
+        '404':
+          description: Recording task not found or not active
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Could not stop/finalize recording
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/recordings/{recording_task_id}:
+    get:
+      summary: Get recording task detail
+      description: Returns status, artifacts, durations, and warnings/errors for the given recording task.
+      operationId: getRecordingDetail
+      tags: [recordings]
+      parameters:
+        - in: path
+          name: recording_task_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Recording task detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingDetail'
+        '404':
+          description: Recording task not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status: { type: string, example: ok }
+        service: { type: string, example: Meeting Transcriber API }
+        version: { type: string, example: "0.3.0" }
+
+    ErrorResponse:
+      type: object
+      properties:
+        detail: { type: string }
+      additionalProperties: false
+
+    AudioFileInfo:
+      type: object
+      properties:
+        original_format: { type: string, example: mp3 }
+        file_size_bytes: { type: integer }
+        file_size_mb: { type: number, format: float }
+        supported: { type: boolean }
+        duration_seconds: { type: number }
+        bit_rate: { type: integer }
+        format_name: { type: string }
+        codec: { type: string }
+        sample_rate: { type: integer }
+        channels: { type: integer }
+
+    ServerLocalUploadRequest:
+      type: object
+      required: [server_local_path]
+      properties:
+        server_local_path:
+          type: string
+          description: Absolute server-local path (e.g., artifact produced by recordings)
+        provenance:
+          type: object
+          description: Optional source metadata
+          properties:
+            source: { type: string, example: recording }
+            recording_task_id: { type: string }
+
+    AudioProcessingQueued:
+      type: object
+      properties:
+        processing_task_id: { type: string }
+        status: { type: string, example: analyzing }
+        message: { type: string }
+      required: [processing_task_id, status]
+
+    AudioProcessingStatus:
+      type: object
+      properties:
+        task_id: { type: string }
+        status:
+          type: string
+          enum: [analyzing, converting, completed, error]
+        created_at: { type: string, format: date-time }
+        file_info: { $ref: '#/components/schemas/AudioFileInfo' }
+        completed_at: { type: string, format: date-time }
+        converted_file:
+          type: string
+          description: Path to converted audio file (server-local)
+        error: { type: string }
+
+    TranscriptionQueued:
+      type: object
+      properties:
+        transcription_task_id: { type: string }
+        status: { type: string, example: processing }
+        processing_task_id: { type: string }
+        config_overrides:
+          type: object
+          additionalProperties: true
+        audio_file_info:
+          $ref: '#/components/schemas/AudioFileInfo'
+      required: [transcription_task_id, status, processing_task_id]
+
+    TranscriptSegment:
+      type: object
+      properties:
+        start: { type: number, example: 0.42 }
+        end: { type: number, example: 3.14 }
+        text: { type: string }
+        speaker: { type: string, example: SPEAKER_00 }
+
+    TranscriptionResult:
+      type: object
+      properties:
+        text: { type: string }
+        segments:
+          type: array
+          items: { $ref: '#/components/schemas/TranscriptSegment' }
+        language: { type: string, example: en }
+        language_probability: { type: number, format: float }
+
+    TranscriptionStatus:
+      type: object
+      properties:
+        task_id: { type: string }
+        status:
+          type: string
+          enum: [processing, completed, error]
+        created_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
+        result: { $ref: '#/components/schemas/TranscriptionResult' }
+        error: { type: string }
+
+    MeetingNotesResult:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [completed, error]
+        notes:
+          type: string
+          description: Generated meeting notes (markdown/plain text)
+        generated_at: { type: string, format: date-time }
+        model_used: { type: string }
+        base_url_used: { type: string }
+        transcript_length: { type: integer }
+        error: { type: string }
+
+    GenerateNotesResponse:
+      type: object
+      properties:
+        task_id: { type: string }
+        transcription_created_at: { type: string, format: date-time }
+        notes_result: { $ref: '#/components/schemas/MeetingNotesResult' }
+
+    OllamaStatus:
+      type: object
+      properties:
+        status: { type: string, example: available }
+        base_url: { type: string }
+        configured_model: { type: string }
+        available_models:
+          oneOf:
+            - type: array
+              items: { type: string }
+            - type: string
+              description: Some responses may return 'unable to fetch'
+
+    # --------------------------
+    # Recording schemas
+    # --------------------------
+    RecordingGlobalStatus:
+      type: object
+      properties:
+        state:
+          type: string
+          enum: [idle, recording]
+        recording_task_id:
+          type: string
+          nullable: true
+        elapsed_seconds:
+          type: number
+          nullable: true
+      required: [state]
+
+    RecordingPreflightResponse:
+      type: object
+      properties:
+        has_blackhole: { type: boolean }
+        has_multi_output_device: { type: boolean }
+        default_output_is_multi_output: { type: boolean }
+        microphone_access_granted: { type: boolean }
+        recommendations:
+          type: array
+          items: { type: string }
+
+    RecordingStartRequest:
+      type: object
+      properties:
+        separate_tracks:
+          type: boolean
+          description: If true, emit mic.wav and system.wav
+          default: true
+        create_mixed:
+          type: boolean
+          description: If true, also emit mixed.wav (system L / mic R)
+          default: true
+        sample_rate:
+          type: integer
+          description: Target sample rate
+          default: 48000
+        format:
+          type: string
+          description: Output format (wav only for now)
+          enum: [wav]
+          default: wav
+      additionalProperties: false
+
+    RecordingStartResponse:
+      type: object
+      properties:
+        recording_task_id: { type: string }
+        status:
+          type: string
+          enum: [recording]
+        started_at: { type: string, format: date-time }
+        config:
+          $ref: '#/components/schemas/RecordingStartRequest'
+      required: [recording_task_id, status, started_at]
+
+    RecordingStopRequest:
+      type: object
+      properties:
+        recording_task_id:
+          type: string
+        auto_handoff:
+          type: boolean
+          description: If true, immediately create an Audio Processing Task from the chosen artifact.
+          default: false
+        handoff_artifact:
+          type: string
+          description: Which artifact to hand off when auto_handoff = true
+          enum: [mixed, system, mic]
+          default: mixed
+      required: [recording_task_id]
+      additionalProperties: false
+
+    RecordingArtifact:
+      type: object
+      properties:
+        path: { type: string, description: Server-local path to artifact }
+        duration_seconds: { type: number, nullable: true }
+        sample_rate: { type: integer, nullable: true }
+        channels: { type: integer, nullable: true }
+        size_bytes: { type: integer, nullable: true }
+
+    RecordingStopResponse:
+      type: object
+      properties:
+        recording_task_id: { type: string }
+        status:
+          type: string
+          enum: [completed, error]
+        completed_at: { type: string, format: date-time }
+        artifacts:
+          type: object
+          properties:
+            mic:
+              oneOf: [ { $ref: '#/components/schemas/RecordingArtifact' }, { type: 'null' } ]
+            system:
+              oneOf: [ { $ref: '#/components/schemas/RecordingArtifact' }, { type: 'null' } ]
+            mixed:
+              oneOf: [ { $ref: '#/components/schemas/RecordingArtifact' }, { type: 'null' } ]
+        auto_handoff_result:
+          type: object
+          nullable: true
+          properties:
+            started:
+              type: boolean
+              description: True if an Audio Processing Task was created
+            processing_task_id:
+              type: string
+              nullable: true
+            message:
+              type: string
+              nullable: true
+        warnings:
+          type: array
+          items: { type: string }
+        error:
+          type: string
+          nullable: true
+      required: [recording_task_id, status]
+
+    RecordingDetail:
+      type: object
+      properties:
+        recording_task_id: { type: string }
+        status:
+          type: string
+          enum: [preflight, recording, finalizing, completed, error]
+        started_at: { type: string, format: date-time, nullable: true }
+        completed_at: { type: string, format: date-time, nullable: true }
+        artifacts:
+          type: object
+          properties:
+            mic:
+              oneOf: [ { $ref: '#/components/schemas/RecordingArtifact' }, { type: 'null' } ]
+            system:
+              oneOf: [ { $ref: '#/components/schemas/RecordingArtifact' }, { type: 'null' } ]
+            mixed:
+              oneOf: [ { $ref: '#/components/schemas/RecordingArtifact' }, { type: 'null' } ]
+        durations:
+          type: object
+          properties:
+            mic_sec: { type: number, nullable: true }
+            system_sec: { type: number, nullable: true }
+            mixed_sec: { type: number, nullable: true }
+        warnings:
+          type: array
+          items: { type: string }
+        error:
+          type: string
+          nullable: true
+      required: [recording_task_id, status]
