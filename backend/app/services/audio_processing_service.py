@@ -1,6 +1,7 @@
 import os
 import tempfile
 import subprocess
+import asyncio
 from pathlib import Path
 from typing import Dict, Any, Union
 from datetime import datetime
@@ -124,7 +125,9 @@ class AudioProcessingService:
         return info
     
     async def _convert_to_standard_wav(self, audio_path: str, original_filename: str) -> str:
-        """Convert audio file to standard WAV format (16kHz, mono, 16-bit PCM)"""
+        """Convert audio file to standard WAV format (16kHz, mono, 16-bit PCM).
+        Uses asyncio subprocess to avoid blocking the event loop.
+        """
         # If already WAV, check if it meets our standards
         if original_filename.lower().endswith('.wav'):
             # Could add validation here to check if it's already in standard format
@@ -147,7 +150,7 @@ class AudioProcessingService:
             if output_path.exists():
                 output_path.unlink()
                 
-            cmd = [
+            cmd = (
                 'ffmpeg',
                 '-y',  # Overwrite output file if it exists
                 '-i', str(audio_path),  # Input file
@@ -157,14 +160,17 @@ class AudioProcessingService:
                 '-ac', '1',              # Mono
                 '-loglevel', 'error',
                 str(output_path)  # Output file
-            ]
-            
+            )
             logger.info(f"Running FFmpeg command: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            
-            if result.returncode != 0:
-                error_msg = f"FFmpeg failed with return code {result.returncode}. "
-                error_msg += f"Stderr: {result.stderr}" if result.stderr else "No error output"
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _out, err = await proc.communicate()
+            if proc.returncode != 0:
+                error_msg = f"FFmpeg failed with return code {proc.returncode}. "
+                error_msg += f"Stderr: {err.decode('utf-8', errors='ignore')}" if err else "No error output"
                 logger.error(error_msg)
                 raise Exception(f"Audio conversion failed: {error_msg}")
                 

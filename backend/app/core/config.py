@@ -12,7 +12,13 @@ class Settings(BaseSettings):
     
     # Pyannote settings
     USE_SPEAKER_DIARIZATION: bool = False  # Safe default (disabled)
-    PYANNOTE_SEGMENTATION_MODEL: str = ""  # Empty fallback - must be set in .env
+    # Options: 'auto' (try offline then online), 'offline' (local only), 'online' (requires token)
+    DIARIZATION_MODE: str = "auto"
+    # Pyannote settings - default to SD 3.1
+    PYANNOTE_SEGMENTATION_MODEL: str = "pyannote/speaker-diarization-3.1"
+    PYANNOTE_SEGMENTATION_MODEL_LOCAL_PATH: str = str(Path.home() / ".cache/huggingface/pyannote/sd3.1/pyannote-models/models--pyannote--speaker-diarization-3.1")
+    DIARIZATION_MIN_SPEAKERS: int = 1
+    DIARIZATION_MAX_SPEAKERS: int = 10
      
     # File settings (hardcoded paths)
     INTERMEDIATE_FOLDER: str = "backend/intermediate"
@@ -71,12 +77,14 @@ class Settings(BaseSettings):
             cls,
             init_settings,
             env_settings,
+            dotenv_settings,
             file_secret_settings,
         ):
-            # Priority order: init_settings > env_settings > .env file
+            # Priority order: init_settings > environment > .env > file secrets
             return (
                 init_settings,
                 env_settings,
+                dotenv_settings,
                 file_secret_settings,
             )
 

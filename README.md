@@ -101,7 +101,7 @@ make process FILE=path/to/your/meeting.m4a
 2. Accept the terms of use for these models (requires email verification):
    - [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1) (required for diarization)
    - [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0) (required for speaker diarization to work)
-3. Generate an access token:
+3. Generate an access token (not required for fully offline mode):
    - Go to [Hugging Face Settings > Access Tokens](https://huggingface.co/settings/tokens)
    - Create a new token with "Read" access
    - Add this token to your `.env` file (see Configuration section below)
@@ -139,7 +139,7 @@ make process FILE=path/to/your/meeting.m4a
    ```bash
    cp backend/.env_example backend/.env
    ```
-2. Edit `.env` and configure the following:
+2. Edit `.env` and configure the following (see Offline Mode below for a tokenless, offline setup):
    - `HUGGINGFACE_TOKEN`: Your Hugging Face access token
    - Adjust other parameters as needed (model sizes, paths, etc.)
 
@@ -156,7 +156,7 @@ make test             # Run tests
 
 ### Server Management
 ```bash
-make start-api        # Start FastAPI server
+make start-uvicorn    # Start FastAPI (Uvicorn) server
 make start-ollama     # Start Ollama server
 make start-servers    # Start both servers
 ```
@@ -245,6 +245,66 @@ Edit `backend/.env` to configure:
 - `WHISPER_MODEL`: Model size (tiny, base, small, medium, large)
 - `COMPUTE_TYPE`: Default is "int8"
 - `LANGUAGE`: Default is "en"
+- `PYANNOTE_SEGMENTATION_MODEL_LOCAL_PATH`: Base local path to your offline pyannote model cache (see Offline Mode)
+
+### Speaker Diarization Modes (offline | online | auto)
+
+The backend supports three diarization modes via `DIARIZATION_MODE`:
+
+- __offline__: Strictly use local files. No internet calls. Requires a local cache of the pyannote model.
+- __online__: Always load from Hugging Face Hub. Requires `HUGGINGFACE_TOKEN` and acceptance of model terms.
+- __auto__: Try offline first; if that fails and a token is available, fallback to online.
+
+Common variables (for all modes):
+- `USE_SPEAKER_DIARIZATION=true|false` — enable/disable diarization
+- `PYANNOTE_SEGMENTATION_MODEL` — default: `pyannote/speaker-diarization-3.1` (can be left as default)
+- `DIARIZATION_MODE=offline|online|auto`
+
+Offline-specific requirements:
+- `PYANNOTE_SEGMENTATION_MODEL_LOCAL_PATH` must point to the base model directory (not a snapshots subdirectory), e.g.:
+  `~/.cache/huggingface/pyannote/sd3.1/pyannote-models/models--pyannote--speaker-diarization-3.1`
+  The app automatically reads `refs/main` to resolve `snapshots/<sha>/config.yaml`. Do not append `snapshots/...` in `.env`.
+- No token is required in strict offline mode.
+
+Online-specific requirements:
+- `HUGGINGFACE_TOKEN` must be set.
+- You must accept the terms for the models on Hugging Face:
+  - https://huggingface.co/pyannote/speaker-diarization-3.1
+  - https://huggingface.co/pyannote/segmentation-3.0
+
+Auto mode behavior:
+- First attempts the offline load using your local cache.
+- If offline fails and a token is available, it falls back to online load.
+- If no token is available, it remains offline-only.
+
+Examples
+
+Offline:
+```ini
+USE_SPEAKER_DIARIZATION=true
+DIARIZATION_MODE=offline
+PYANNOTE_SEGMENTATION_MODEL=pyannote/speaker-diarization-3.1
+PYANNOTE_SEGMENTATION_MODEL_LOCAL_PATH=~/.cache/huggingface/pyannote/sd3.1/pyannote-models/models--pyannote--speaker-diarization-3.1
+# HUGGINGFACE_TOKEN is not required for offline
+```
+
+Online:
+```ini
+USE_SPEAKER_DIARIZATION=true
+DIARIZATION_MODE=online
+HUGGINGFACE_TOKEN=your_hf_token_here
+PYANNOTE_SEGMENTATION_MODEL=pyannote/speaker-diarization-3.1
+# PYANNOTE_SEGMENTATION_MODEL_LOCAL_PATH is optional in pure online mode
+```
+
+Auto (offline-first with online fallback if token is present):
+```ini
+USE_SPEAKER_DIARIZATION=true
+DIARIZATION_MODE=auto
+PYANNOTE_SEGMENTATION_MODEL=pyannote/speaker-diarization-3.1
+PYANNOTE_SEGMENTATION_MODEL_LOCAL_PATH=~/.cache/huggingface/pyannote/sd3.1/pyannote-models/models--pyannote--speaker-diarization-3.1
+HUGGINGFACE_TOKEN=your_hf_token_here  # Optional; enables online fallback
+```
 
 ### Performance Tuning
 - **For better quality**: Use `gpt-oss:20b` (requires more resources)
@@ -261,7 +321,7 @@ Edit `backend/.env` to configure:
 ```bash
 # Start services individually
 make start-ollama    # Start Ollama service
-make start-api       # Start FastAPI server
+make start-uvicorn   # Start FastAPI (Uvicorn) server
 ```
 
 ### Manual Virtual Environment Setup
@@ -565,10 +625,56 @@ Final outputs are saved to `finaloutput/` with human-readable timestamps:
 ## Important Notes
 
 - **Virtual Environment**: Always activate `backend/venv` before starting the server
-- **First Run**: Downloads Whisper and diarization models (may take time)
-- **HuggingFace Token**: Required for speaker diarization
+- **First Run**: Downloads Whisper and (if not using Offline Mode) diarization models
+- **HuggingFace Token**: Not required when using fully offline diarization setup
 - **Ollama**: Must be running for meeting notes generation
 - **File Cleanup**: Use Makefile targets (`make clean` / `make clean-all`) to manage disk space
+
+## 📦 Offline Mode (Pyannote Diarization Without Internet)
+
+You can run speaker diarization fully offline using pre-downloaded pyannote models. The backend will resolve the correct snapshot locally and will not attempt any network calls.
+
+### Step 1: Prepare Local Model Cache
+
+1. Create the cache directory:
+   ```bash
+   mkdir -p ~/.cache/huggingface/pyannote/sd3.1
+   ```
+2. Unzip the provided archive into that directory while preserving structure:
+   ```bash
+   unzip pynode-model/pyannote-models.zip -d ~/.cache/huggingface/pyannote/sd3.1
+   ```
+   After extraction, you should have a path like:
+   `~/.cache/huggingface/pyannote/sd3.1/pyannote-models/models--pyannote--speaker-diarization-3.1/`
+
+### Step 2: Configure .env
+
+Edit `backend/.env` and set the base local path (do NOT append `snapshots/latest`):
+
+```ini
+# Enable diarization if desired
+USE_SPEAKER_DIARIZATION=true
+
+# Point to the base models directory; the app resolves the actual snapshot via refs/main
+PYANNOTE_SEGMENTATION_MODEL_LOCAL_PATH=~/.cache/huggingface/pyannote/sd3.1/pyannote-models/models--pyannote--speaker-diarization-3.1
+
+# When using fully offline mode, HUGGINGFACE_TOKEN can be omitted
+# HUGGINGFACE_TOKEN=
+```
+
+Notes:
+- The app reads `refs/main` inside the model folder to find the correct `snapshots/<hash>` and validate `config.yaml`.
+- Offline mode is enforced internally (`HF_HUB_OFFLINE` and `TRANSFORMERS_OFFLINE`) to prevent network access during inference.
+
+### Step 3: Start Services and Run
+
+```bash
+make venv-activate
+make start-servers
+make process FILE=path/to/your/meeting.m4a
+```
+
+If diarization is disabled or not needed, set `USE_SPEAKER_DIARIZATION=false`.
 
 ## License
 
