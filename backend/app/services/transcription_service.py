@@ -1,29 +1,17 @@
-import sys
 import warnings
 import os
 import tempfile
 import subprocess
-from typing import Union
-from pathlib import Path
-from typing import Dict, Any, Union
-from datetime import datetime
-import uuid
 import asyncio
-import logging
+from typing import Union, Dict, Any, Optional, List, Tuple
+from pathlib import Path
+from datetime import datetime
 
 from app.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-import torch
-import asyncio
-from pathlib import Path
-from datetime import datetime
-from typing import Dict, Optional, List, Tuple, Any
-
-import torchcodec
 from faster_whisper import WhisperModel
-from huggingface_hub import HfApi, model_info
 
 from app.core.config import settings
 from app.utils.timestamp_utils import generate_transcription_filename, generate_human_readable_timestamp
@@ -47,180 +35,27 @@ class TranscriptionService:
         self.model = None
         self.diarization_pipeline = None
         self.tasks: Dict[str, Dict] = {}
+        # Cache for alternate whisper models keyed by (model, compute_type)
+        self._model_cache: Dict[Tuple[str, str], WhisperModel] = {}
         
     async def initialize_models(self):
-        """Initialize the Whisper model and diarization pipeline"""
+        """Initialize the Whisper model and, if enabled, prepare diarization pipeline."""
         if self.model is None:
             self.model = WhisperModel(
                 settings.WHISPER_MODEL,
                 compute_type=settings.COMPUTE_TYPE
             )
-            
-        if settings.USE_SPEAKER_DIARIZATION and self.diarization_pipeline is None and PYAUDIO_AVAILABLE:
-            hf_token = os.environ.get('HUGGINGFACE_TOKEN') or settings.HUGGINGFACE_TOKEN
-                
+        if settings.USE_SPEAKER_DIARIZATION and self.diarization_pipeline is None:
             try:
-                import torchaudio  # noqa: F401  # Just check if it's available
-                logger.info(f"Initializing speaker diarization with model: {settings.PYANNOTE_SEGMENTATION_MODEL}")
-                
-                # Determine mode early to avoid offline path resolution in online mode
-                mode = (settings.DIARIZATION_MODE or 'auto').lower()
-                if mode not in {'offline', 'online', 'auto'}:
-                    mode = 'auto'
-
-                # If online mode requested, initialize directly from HF Hub and skip local path checks
-                if mode == 'online':
-                    logger.info("Diarization mode=online: initializing from Hugging Face Hub...")
-                    tok = hf_token or settings.HUGGINGFACE_TOKEN
-                    if not tok:
-                        raise RuntimeError("Online diarization requires HUGGINGFACE_TOKEN.")
-                    from pyannote.audio import Pipeline as _Pipeline
-                    self.diarization_pipeline = _Pipeline.from_pretrained(
-                        settings.PYANNOTE_SEGMENTATION_MODEL or 'pyannote/speaker-diarization-3.1',
-                        use_auth_token=tok
-                    )
+                pipe = self._load_diarization_pipeline()
+                if pipe is not None:
+                    self.diarization_pipeline = pipe
+                    logger.info("Speaker diarization pipeline ready")
                 else:
-                    # Load the pipeline (offline-first or auto)
-                    logger.info("Loading speaker diarization pipeline (offline-first)...")
-                    
-                    # Resolve the local model path robustly (handles absence of 'latest' symlink)
-                    requested_path = Path(settings.PYANNOTE_SEGMENTATION_MODEL_LOCAL_PATH).expanduser()
-                
-                    # Derive repository root that contains 'refs' and 'snapshots'
-                    repo_root = requested_path
-                    # If user pointed to a 'snapshots/<something>' or deeper, walk up to repo root
-                    parent_names = {p.name for p in repo_root.parents}
-                    if repo_root.name == "snapshots" or "snapshots" in parent_names:
-                        while repo_root.name != "snapshots" and repo_root.parent != repo_root:
-                            repo_root = repo_root.parent
-                        if repo_root.name == "snapshots":
-                            repo_root = repo_root.parent
-                    # If user pointed higher (e.g., sd3.1), jump into pyannote-models/.../models--<org--name>
-                    if (repo_root / "pyannote-models").exists():
-                        repo_root = repo_root / "pyannote-models" / f"models--{settings.PYANNOTE_SEGMENTATION_MODEL.replace('/', '--')}"
-                    
-                    # Resolve snapshot via refs/main
-                    resolved_model_path = None
-                    refs_main = repo_root / "refs" / "main"
-                    snapshots_dir = repo_root / "snapshots"
-                    try:
-                        if refs_main.exists():
-                            with open(refs_main, "r", encoding="utf-8") as fh:
-                                sha = fh.read().strip()
-                            candidate = snapshots_dir / sha
-                            if (candidate / "config.yaml").exists():
-                                resolved_model_path = candidate
-                        # Fallbacks
-                        if resolved_model_path is None:
-                            # If requested path itself has config.yaml, use it
-                            if (requested_path / "config.yaml").exists():
-                                resolved_model_path = requested_path
-                            # Otherwise pick newest snapshot with config.yaml
-                            elif snapshots_dir.exists():
-                                candidates = [p for p in snapshots_dir.glob("*") if (p / "config.yaml").exists()]
-                                if candidates:
-                                    resolved_model_path = sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)[0]
-                    except Exception as e:
-                        logger.error(f"Error resolving local pyannote model path: {e}")
-                        resolved_model_path = None
-                    
-                    # Validate final path
-                    if resolved_model_path is None or not (resolved_model_path / "config.yaml").exists():
-                        logger.error("Unable to locate a valid local pyannote model directory. Looked under: %s", repo_root)
-                        settings.USE_SPEAKER_DIARIZATION = False
-                        return
-                    
-                    model_path = resolved_model_path
-                    logger.info(f"Using model from: {model_path}")
-                
-                # If online mode requested, try online first; else offline-first
-                def _set_offline_env(on: bool):
-                    if on:
-                        os.environ['HF_HUB_OFFLINE'] = '1'
-                        os.environ['TRANSFORMERS_OFFLINE'] = '1'
-                    else:
-                        os.environ.pop('HF_HUB_OFFLINE', None)
-                        os.environ.pop('TRANSFORMERS_OFFLINE', None)
-
-                # Only reset if we haven't already set a pipeline (e.g., online fast path above)
-                if self.diarization_pipeline is None:
-                    self.diarization_pipeline = None
-                # Always set cache path for pyannote when using local model path
-                if mode != 'online':
-                    os.environ['PYANNOTE_CACHE'] = str(model_path.parent)
-
-                def _load_offline():
-                    _set_offline_env(True)
-                    kwargs = {}
-                    if hf_token:
-                        kwargs['use_auth_token'] = hf_token
-                    config_path = Path(model_path) / "config.yaml"
-                    return Pipeline.from_pretrained(str(config_path), **kwargs)
-
-                def _load_online():
-                    _set_offline_env(False)
-                    tok = hf_token or settings.HUGGINGFACE_TOKEN
-                    if not tok:
-                        raise RuntimeError("Online diarization requires HUGGINGFACE_TOKEN.")
-                    return Pipeline.from_pretrained(
-                        settings.PYANNOTE_SEGMENTATION_MODEL or 'pyannote/speaker-diarization-3.1',
-                        use_auth_token=tok
-                    )
-
-                try:
-                    if mode == 'online' and self.diarization_pipeline is None:
-                        logger.info("Diarization mode=online: trying online model load...")
-                        self.diarization_pipeline = _load_online()
-                    elif mode == 'offline':
-                        logger.info("Diarization mode=offline: trying offline local model load...")
-                        self.diarization_pipeline = _load_offline()
-                    else:
-                        # auto: offline first then online
-                        logger.info("Diarization mode=auto: trying offline load, with online fallback if token available...")
-                        try:
-                            self.diarization_pipeline = _load_offline()
-                        except Exception as off_e:
-                            logger.warning(f"Offline diarization load failed: {off_e}")
-                            if hf_token or settings.HUGGINGFACE_TOKEN:
-                                try:
-                                    self.diarization_pipeline = _load_online()
-                                except Exception as on_e:
-                                    logger.error(f"Online diarization load failed: {on_e}")
-                                    self.diarization_pipeline = None
-                            else:
-                                logger.info("No token available; skipping online fallback.")
-                
-                    
-                    # Test the pipeline with a small audio file to verify it works
-                    test_audio = os.path.join(os.path.dirname(__file__), "..", "..", "test_audio", "test_440hz.wav")
-                    if os.path.exists(test_audio):
-                        try:
-                            logger.info("Testing speaker diarization pipeline...")
-                            _ = self.diarization_pipeline(test_audio)
-                            logger.info("✓ Speaker diarization pipeline initialized and tested successfully")
-                        except Exception as test_e:
-                            logger.warning(f"Speaker diarization test failed: {str(test_e)}")
-                            logger.warning("Continuing without speaker diarization")
-                            settings.USE_SPEAKER_DIARIZATION = False
-                except Exception as e:
-                    logger.error(f"Failed to initialize speaker diarization: {str(e)}")
-                    logger.error("Please ensure all model files are downloaded and accessible locally")
+                    logger.warning("Speaker diarization requested but pipeline could not be loaded; disabling.")
                     settings.USE_SPEAKER_DIARIZATION = False
-                else:
-                    logger.info("Speaker diarization pipeline initialized (test audio not found for verification)")
-                
-            except ImportError as e:
-                logger.warning(f"{str(e)}. Speaker diarization will be disabled.")
-                if 'No module named' in str(e):
-                    logger.warning("Please install required packages: pip install torchaudio pyannote.audio")
-                settings.USE_SPEAKER_DIARIZATION = False
             except Exception as e:
-                logger.error(f"Failed to initialize speaker diarization: {str(e)}")
-                logger.error("This could be due to:")
-                logger.error("1. Invalid local pyannote model path or missing files (config.yaml)")
-                logger.error("2. Corrupted or incomplete local cache extraction")
-                logger.error("3. Incompatible pyannote/audio or torchaudio installation")
-                logger.error("If you intend to run online, ensure token access and model terms are accepted.")
+                logger.warning(f"Diarization initialization failed: {e}")
                 settings.USE_SPEAKER_DIARIZATION = False
     
     def _load_diarization_pipeline(self, hf_token: Optional[str] = None, mode: Optional[str] = None):
@@ -473,7 +308,7 @@ class TranscriptionService:
                 # (task context not available in this scope)
     
     async def _convert_to_wav(self, audio_path: Union[str, Path]) -> str:
-        """Converts an audio file to WAV format if it's not already."""
+        """Converts an audio file to WAV format if it's not already. Uses asyncio subprocess to avoid blocking."""
         audio_path_str = str(audio_path)
         if audio_path_str.lower().endswith('.wav'):
             return audio_path_str
@@ -481,13 +316,19 @@ class TranscriptionService:
         temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False).name
         
         try:
-            cmd = [
+            cmd = (
                 'ffmpeg', '-y', '-i', audio_path_str,
                 '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1',
                 '-loglevel', 'error', temp_wav
-            ]
-            
-            subprocess.run(cmd, check=True)
+            )
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _out, err = await proc.communicate()
+            if proc.returncode != 0:
+                raise subprocess.CalledProcessError(proc.returncode, cmd, output=_out, stderr=err)
             return temp_wav
             
         except subprocess.CalledProcessError as e:
@@ -503,15 +344,19 @@ class TranscriptionService:
         whisper_model = config_overrides.get('whisper_model', settings.WHISPER_MODEL)
         compute_type = config_overrides.get('compute_type', settings.COMPUTE_TYPE)
         
-        # Initialize model with overrides if different from current
+        # Initialize model with overrides if different from current; use cache to avoid repeated heavy loads
         model_to_use = self.model
-        if (whisper_model != settings.WHISPER_MODEL or 
-            compute_type != settings.COMPUTE_TYPE):
-            try:
-                model_to_use = WhisperModel(whisper_model, compute_type=compute_type)
-            except Exception as e:
-                print(f"Warning: Failed to load override model {whisper_model}, using default: {e}")
-                model_to_use = self.model
+        key = (whisper_model, compute_type)
+        if key != (settings.WHISPER_MODEL, settings.COMPUTE_TYPE):
+            cached = self._model_cache.get(key)
+            if cached is None:
+                try:
+                    cached = WhisperModel(whisper_model, compute_type=compute_type)
+                    self._model_cache[key] = cached
+                except Exception as e:
+                    logger.warning(f"Failed to load override model {whisper_model} ({compute_type}); using default. Error: {e}")
+                    cached = self.model
+            model_to_use = cached
         
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -539,7 +384,9 @@ class TranscriptionService:
         )
     
     def _combine_speaker_segments(self, segments, diarization):
-        """Combine Whisper segments with speaker diarization using word-level timestamps."""
+        """Combine Whisper segments with speaker diarization using word-level timestamps.
+        Optimized to avoid building dense centisecond timelines for long audio.
+        """
         logger.info("--- Diarization Debug ---")
         logger.info(f"Num transcription segments: {len(segments)}")
         if segments:
@@ -564,26 +411,48 @@ class TranscriptionService:
                 seg.speaker = 'SPEAKER_00'
             return segments
 
-        # Create a timeline of speakers from diarization
-        speaker_timeline = {}
+        # Collect diarization intervals once, sorted by start
+        intervals: List[Tuple[float, float, str]] = []
         for turn, _, speaker in diarization.itertracks(yield_label=True):
-            for i in range(int(turn.start * 100), int(turn.end * 100)):
-                speaker_timeline[i] = speaker
-
-        if not speaker_timeline:
-            # No speaker intervals mapped (edge-case): fallback to SPEAKER_00 for all
-            logger.warning("Empty speaker timeline from diarization - assigning SPEAKER_00 to all segments")
+            intervals.append((float(turn.start), float(turn.end), str(speaker)))
+        intervals.sort(key=lambda x: x[0])
+        if not intervals:
             for seg in segments:
                 seg.speaker = 'SPEAKER_00'
             return segments
 
+        def speaker_at(time_s: float, start_idx: int = 0) -> Tuple[str, int]:
+            """Find speaker label whose interval contains time_s. Returns (speaker, new_index)."""
+            idx = start_idx
+            n = len(intervals)
+            # Advance index while current interval ends before time
+            while idx < n and intervals[idx][1] <= time_s:
+                idx += 1
+            # If current interval spans time, use it
+            if idx < n and intervals[idx][0] <= time_s < intervals[idx][1]:
+                return intervals[idx][2], idx
+            # Check previous interval
+            if idx > 0 and intervals[idx-1][0] <= time_s < intervals[idx-1][1]:
+                return intervals[idx-1][2], idx-1
+            return 'SPEAKER_00', idx
+
         new_segments = []
         for segment in segments:
             if not hasattr(segment, 'words') or not segment.words:
-                # If no word timestamps, use the old logic for the segment
-                speakers = [speaker_timeline.get(i) for i in range(int(segment.start * 100), int(segment.end * 100))]
-                valid_speakers = [s for s in speakers if s is not None]
-                segment.speaker = max(set(valid_speakers), key=valid_speakers.count) if valid_speakers else 'SPEAKER_00'
+                # Majority overlap speaker without dense sampling
+                s_start, s_end = float(segment.start), float(segment.end)
+                max_overlap = 0.0
+                chosen = 'SPEAKER_00'
+                for a, b, spk in intervals:
+                    if b <= s_start:
+                        continue
+                    if a >= s_end:
+                        break
+                    overlap = max(0.0, min(b, s_end) - max(a, s_start))
+                    if overlap > max_overlap:
+                        max_overlap = overlap
+                        chosen = spk
+                segment.speaker = chosen
                 new_segments.append(segment)
                 continue
 
@@ -591,18 +460,11 @@ class TranscriptionService:
             current_text = ""
             current_start = segment.words[0].start
 
+            idx_hint = 0
             for word in segment.words:
-                # Check a small range around the word's midpoint for a speaker
-                start_check = int(word.start * 100)
-                end_check = int(word.end * 100)
-                speaker = 'SPEAKER_00'
-                for i in range(start_check, end_check + 1):
-                    if i in speaker_timeline:
-                        speaker = speaker_timeline[i]
-                        break
-                if speaker == 'SPEAKER_00': # Fallback to midpoint if range check fails
-                    word_mid_point = int(((word.start + word.end) / 2) * 100)
-                    speaker = speaker_timeline.get(word_mid_point, 'SPEAKER_00')
+                # Use word midpoint to determine speaker efficiently
+                mid = (float(word.start) + float(word.end)) / 2.0
+                speaker, idx_hint = speaker_at(mid, idx_hint)
 
                 # Minimal per-word debug to catch mapping issues (rate-limited by segments)
                 logger.debug(f"word '{getattr(word, 'word', '')}' [{word.start:.2f},{word.end:.2f}] -> {speaker}")
