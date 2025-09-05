@@ -1,4 +1,7 @@
 # backend/app/main.py
+import os
+os.environ.setdefault("MPLBACKEND", "Agg")
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -7,8 +10,14 @@ import asyncio
 import sys
 import argparse
 
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+except Exception:
+    pass
+
 from app.api.endpoints import transcribe, meeting_notes, audio_processing
-from app.services.transcription_service import transcription_service
+from app.api.endpoints import recordings
 from app.core.config import settings
 from app.utils.logging_config import setup_logging, get_logger
 
@@ -49,10 +58,18 @@ app.include_router(
     tags=["audio-processing"]
 )
 
+app.include_router(
+    recordings.router,
+    prefix="/api/v1",
+    tags=["recordings"]
+)
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on application startup"""
     try:
+        # Lazy import to avoid heavy dependencies during module import
+        from app.services.transcription_service import transcription_service
         logger.info("Initializing transcription service...")
         await transcription_service.initialize_models()
         logger.info("Transcription service initialized successfully")

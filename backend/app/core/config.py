@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from typing import Set
+from typing import Set, Optional
 from pathlib import Path
 
 class Settings(BaseSettings):
@@ -7,8 +7,13 @@ class Settings(BaseSettings):
     VERSION: str = "0.1.0"
     
     # Whisper settings
-    WHISPER_MODEL: str = "base"  # Minimal fallback
-    COMPUTE_TYPE: str = "int8"   # Safe default
+    WHISPER_MODEL: str = "base"  # Default model (override via .env)
+    COMPUTE_TYPE: str = "int8"   # Default compute type
+    # VAD and decoding thresholds
+    VAD_ENABLED: bool = True
+    VAD_MIN_SILENCE_MS: int = 300
+    NO_SPEECH_THRESHOLD: float = 0.3
+    LOGPROB_THRESHOLD: float = -1.0
     
     # Pyannote settings
     USE_SPEAKER_DIARIZATION: bool = False  # Safe default (disabled)
@@ -24,7 +29,15 @@ class Settings(BaseSettings):
     INTERMEDIATE_FOLDER: str = "backend/intermediate"
     FINAL_OUTPUT_FOLDER: str = "finaloutput"
     MAX_FILE_SIZE: int = 10 * 1024 * 1024  # 10MB fallback
-    ALLOWED_EXTENSIONS: Set[str] = {"wav", "mp3", "m4a", "mp4", "ogg", "flac", "mov"}
+    # Broad set of audio/video containers we can convert to WAV
+    ALLOWED_EXTENSIONS: Set[str] = {
+        # Audio
+        "wav", "mp3", "m4a", "aac", "flac", "ogg", "oga", "opus", "wma",
+        "amr", "aiff", "aif", "caf", "mka", "wv",
+        # Video containers (audio track will be extracted)
+        "mp4", "m4v", "mov", "mkv", "webm", "avi", "mpg", "mpeg", "3gp",
+        "3gpp", "3g2", "ts", "ogv", "flv", "wmv"
+    }
     
     # Audio processing settings
     STANDARD_SAMPLE_RATE: int = 16000
@@ -40,6 +53,26 @@ class Settings(BaseSettings):
     
     # Logging settings
     LOG_LEVEL: str = "WARNING"
+    
+    # Recordings root (allow-list base for server-local recording paths)
+    # Prefer this variable; WORKSPACE_ROOT is still supported for backward-compat.
+    RECORDINGS_ROOT: Optional[str] = None
+    # Legacy name (backward compatibility)
+    WORKSPACE_ROOT: Optional[str] = None
+
+    # Recording/mixing configuration
+    RECORDING_USE_LIVE_MIX: bool = True
+    RECORDING_MIX_POLICY: str = "separation"  # "separation" | "audible_mix"
+    BLACKHOLE_DEVICE_NAME: str = "BlackHole 2ch"
+    RECORDING_SAMPLERATE: int = 48000
+    # Optional explicit device indices (override auto-detect)
+    RECORDING_MIC_INDEX: Optional[int] = None
+    RECORDING_BLACKHOLE_INDEX: Optional[int] = None
+    # Portable selection hints
+    # Prefer mic device names containing this substring (case-insensitive) when choosing a microphone
+    RECORDING_MIC_NAME_HINT: Optional[str] = "Microphone"
+    # Comma-separated substrings to ignore when picking mic devices (e.g., virtual/loopback/camera inputs)
+    RECORDING_IGNORE_INPUTS: str = "ZoomAudioDevice,Teams,Virtual,Camera"
     
     @property
     def project_root(self) -> Path:
@@ -60,6 +93,18 @@ class Settings(BaseSettings):
     def intermediate_folder_path(self) -> Path:
         """Get the full path to intermediate folder relative to project root"""
         return self.project_root / self.INTERMEDIATE_FOLDER
+
+    @property
+    def workspace_root_path(self) -> Path:
+        """Base directory allowed for server-local recording/audio paths.
+        Resolution priority: RECORDINGS_ROOT > WORKSPACE_ROOT (legacy) > intermediate folder (default).
+        """
+        # Prefer new env var if set
+        root = self.RECORDINGS_ROOT or self.WORKSPACE_ROOT
+        if root:
+            return Path(root).expanduser().resolve()
+        # Default to intermediate folder for tighter sandbox by default
+        return self.intermediate_folder_path.resolve()
     
     @property
     def logs_folder_path(self) -> Path:

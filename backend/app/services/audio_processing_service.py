@@ -3,7 +3,7 @@ import tempfile
 import subprocess
 import asyncio
 from pathlib import Path
-from typing import Dict, Any, Union
+from typing import Dict, Any, Optional
 from datetime import datetime
 import uuid
 import shutil
@@ -18,8 +18,15 @@ class AudioProcessingService:
     def __init__(self):
         self.processing_tasks: Dict[str, Dict] = {}
         
-    async def create_processing_task(self, uploaded_file_path: str, original_filename: str) -> str:
-        """Create a new audio processing task for file analysis and conversion"""
+    async def create_processing_task(self, uploaded_file_path: str, original_filename: str, *, input_type: str = "multipart", provenance: Optional[Dict[str, Any]] = None) -> str:
+        """Create a new audio processing task for file analysis and conversion
+        
+        Args:
+            uploaded_file_path: Absolute path to the audio file to process.
+            original_filename: Original filename (used for metadata/extension).
+            input_type: "multipart" | "server_local" for provenance/metrics.
+            provenance: Optional context (e.g., recording task id).
+        """
         task_id = str(uuid.uuid4())
         
         # Analyze file type and properties
@@ -29,6 +36,8 @@ class AudioProcessingService:
             'status': 'analyzing',
             'original_file': uploaded_file_path,
             'original_filename': original_filename,
+            'input_type': input_type,
+            'provenance': provenance or {},
             'file_info': file_info,
             'converted_file': None,
             'created_at': datetime.utcnow().isoformat(),

@@ -90,8 +90,7 @@ class TranscriptionService:
                     return None
                 return Pipeline.from_pretrained(
                     settings.PYANNOTE_SEGMENTATION_MODEL or 'pyannote/speaker-diarization-3.1',
-                    use_auth_token=tok,
-                    local_files_only=False
+                    use_auth_token=tok
                 )
 
             requested_path = Path(settings.PYANNOTE_SEGMENTATION_MODEL_LOCAL_PATH).expanduser()
@@ -165,7 +164,7 @@ class TranscriptionService:
                         return None
                 return None
         except Exception as e:
-            logger.error(f"Offline diarization pipeline load failed: {e}")
+            logger.error(f"Diarization pipeline load failed: {e}")
             return None
 
     async def create_task(self, audio_path: str, config_overrides: Dict[str, Any] = None) -> str:
@@ -240,6 +239,9 @@ class TranscriptionService:
         # Convert audio to WAV if needed
         wav_path = await self._convert_to_wav(audio_path)
         
+        # Prepare fallbacks so the 'finally' section can safely run
+        full_transcript: Optional[str] = None
+        segments: List[Any] = []
         try:
             # Transcribe audio with config overrides
             segments_generator, info = await self._transcribe_audio(wav_path, config_overrides)
@@ -285,7 +287,7 @@ class TranscriptionService:
                 os.unlink(wav_path)
             
             # Save transcription to final output folder with timestamp
-            if save_to_file:
+            if save_to_file and full_transcript is not None and segments:
                 timestamp = generate_human_readable_timestamp()
                 filename = generate_transcription_filename(timestamp)
                 output_path = settings.final_output_folder_path / filename
@@ -358,16 +360,44 @@ class TranscriptionService:
                     cached = self.model
             model_to_use = cached
         
+        # Resolve inference parameters from overrides or settings
+        language = "en"
+        vad_filter = config_overrides.get('vad_filter')
+        if vad_filter is None:
+            vad_filter = bool(getattr(settings, 'VAD_ENABLED', True))
+        vad_min_silence = int(config_overrides.get('vad_min_silence_ms')
+                              or getattr(settings, 'VAD_MIN_SILENCE_MS', 300))
+        no_speech_threshold = float(config_overrides.get('no_speech_threshold')
+                                    or getattr(settings, 'NO_SPEECH_THRESHOLD', 0.3))
+        logprob_threshold = float(config_overrides.get('logprob_threshold')
+                                  or getattr(settings, 'LOGPROB_THRESHOLD', -1.0))
+
+        # Build kwargs compatible with the installed faster-whisper version
+        import inspect
+        sig = None
+        try:
+            sig = inspect.signature(model_to_use.transcribe)
+        except Exception:
+            pass
+        allowed = set(sig.parameters.keys()) if sig else set()
+        kwargs = {
+            "language": language,
+            "word_timestamps": True,
+            "vad_filter": vad_filter,
+            "vad_parameters": dict(min_silence_duration_ms=vad_min_silence),
+        }
+        if not allowed or "no_speech_threshold" in allowed:
+            kwargs["no_speech_threshold"] = no_speech_threshold
+        if not allowed or "logprob_threshold" in allowed:
+            kwargs["logprob_threshold"] = logprob_threshold
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             return await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: model_to_use.transcribe(
                     audio_path,
-                    language="en",
-                    word_timestamps=True,
-                    vad_filter=True,
-                    vad_parameters=dict(min_silence_duration_ms=500)
+                    **kwargs,
                 )
             )
     

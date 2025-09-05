@@ -175,6 +175,40 @@ make clean        # Remove temporary files
 make clean-all    # Remove all generated files
 ```
 
+## 📡 API Usage: Upload + Transcribe
+
+- Upload can be done in two ways:
+  - Multipart upload (existing): POST `/api/v1/upload-audio` with form field `file`
+  - Server-local path (new): POST `/api/v1/upload-audio` with JSON body:
+    ```json
+    {
+      "server_local_path": "/absolute/path/under/workspace/recording.wav",
+      "provenance": { "source": "recording", "recording_task_id": "optional-id" }
+    }
+    ```
+
+- Both inputs are mutually exclusive. The response shape is unchanged:
+  ```json
+  { "processing_task_id": "<id>", "status": "analyzing", "message": "..." }
+  ```
+
+- Then start/poll transcription as before:
+  - POST `/api/v1/transcribe/{processing_task_id}` to start
+  - GET `/api/v1/transcribe/{task_id}` to poll
+
+### Workspace and Validation
+
+- Allowed base directory (allow-list): `RECORDINGS_ROOT` env (preferred).
+  - Backward compatible: `WORKSPACE_ROOT` is also supported.
+  - Default if unset: the app's `intermediate` folder (safer sandbox).
+- Server-local path validations (400 on failure):
+  - must exist and be a regular file (no symlinks)
+  - must be inside `WORKSPACE_ROOT`
+  - non-empty; extension in allowed set
+  - minimal ffprobe check to confirm an audio stream
+
+Duplicate submissions from the same server path create separate processing tasks (no de-duplication).
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please follow these steps:

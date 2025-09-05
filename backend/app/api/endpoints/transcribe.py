@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 from fastapi import APIRouter, UploadFile, HTTPException, status, BackgroundTasks, Query, Header
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 
 from app.services.transcription_service import transcription_service
 from app.core.config import settings
@@ -23,6 +23,10 @@ async def transcribe_audio(
     whisper_model: Optional[str] = Query(None, description="Override Whisper model (e.g., small.en, medium.en)"),
     compute_type: Optional[str] = Query(None, description="Override compute type (e.g., int8, float16)"),
     use_diarization: Optional[bool] = Query(None, description="Override speaker diarization setting"),
+    vad_filter: Optional[bool] = Query(None, description="Enable/disable VAD filtering"),
+    vad_min_silence_ms: Optional[int] = Query(None, description="VAD min silence duration in ms"),
+    no_speech_threshold: Optional[float] = Query(None, description="Decoder no-speech threshold"),
+    logprob_threshold: Optional[float] = Query(None, description="Decoder logprob threshold"),
     hf_token: Optional[str] = Header(None, alias="X-HuggingFace-Token", description="Override HuggingFace token")):
     """
     Transcribe a pre-processed audio file using its processing task ID.
@@ -81,6 +85,14 @@ async def transcribe_audio(
             config_overrides['use_diarization'] = use_diarization
         if hf_token:
             config_overrides['hf_token'] = hf_token
+        if vad_filter is not None:
+            config_overrides['vad_filter'] = vad_filter
+        if vad_min_silence_ms is not None:
+            config_overrides['vad_min_silence_ms'] = vad_min_silence_ms
+        if no_speech_threshold is not None:
+            config_overrides['no_speech_threshold'] = no_speech_threshold
+        if logprob_threshold is not None:
+            config_overrides['logprob_threshold'] = logprob_threshold
         
         # Create and start transcription task
         logger.info(f"Creating transcription task for file: {converted_file_path}")
@@ -137,3 +149,62 @@ async def get_transcription(task_id: str):
         response["completed_at"] = task.get('completed_at')
     
     return response
+
+
+@router.get("/transcribe/defaults")
+async def get_transcription_defaults():
+    """Return effective default transcription settings from environment/config."""
+    return {
+        "whisper_model": settings.WHISPER_MODEL,
+        "compute_type": settings.COMPUTE_TYPE,
+        "use_diarization": settings.USE_SPEAKER_DIARIZATION,
+        "diarization_mode": settings.DIARIZATION_MODE,
+        "vad_enabled": getattr(settings, "VAD_ENABLED", True),
+        "vad_min_silence_ms": getattr(settings, "VAD_MIN_SILENCE_MS", 300),
+        "no_speech_threshold": getattr(settings, "NO_SPEECH_THRESHOLD", 0.3),
+        "logprob_threshold": getattr(settings, "LOGPROB_THRESHOLD", -1.0),
+    }
+
+
+@router.get("/transcripts")
+async def list_transcripts(limit: int = 50):
+    """List saved transcript files (most recent first)."""
+    out_dir = settings.final_output_folder_path
+    out_dir.mkdir(parents=True, exist_ok=True)
+    items = []
+    try:
+        for p in sorted(out_dir.glob("*.md"), key=lambda x: x.stat().st_mtime, reverse=True)[:limit]:
+            st = p.stat()
+            items.append({
+                "filename": p.name,
+                "size_bytes": st.st_size,
+                "modified_at": int(st.st_mtime),
+                "path": str(p),
+            })
+    except Exception:
+        pass
+    return {"items": items}
+
+
+@router.get("/transcripts/{filename}")
+async def download_transcript(filename: str):
+    """Download a single transcript markdown file by name.
+
+    Security: ensures the requested file resides within the final output folder and
+    only allows .md files.
+    """
+    base = settings.final_output_folder_path
+    base.mkdir(parents=True, exist_ok=True)
+    # Basic sanitization: disallow path separators and enforce .md extension
+    if "/" in filename or ".." in filename or not filename.endswith(".md"):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    path = base / filename
+    try:
+        resolved = path.resolve(strict=False)
+        if base.resolve() not in resolved.parents and resolved != base.resolve():
+            raise HTTPException(status_code=400, detail="Invalid path")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    return FileResponse(str(path), media_type="text/markdown", filename=filename)

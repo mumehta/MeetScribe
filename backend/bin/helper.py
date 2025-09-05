@@ -15,14 +15,38 @@ def get_content_type(file_path: str) -> str:
     """Get the appropriate content type based on file extension."""
     ext = os.path.splitext(file_path)[1].lower()
     return {
+        # Audio
         '.wav': 'audio/wav',
         '.mp3': 'audio/mpeg',
         '.m4a': 'audio/mp4',
-        '.mp4': 'video/mp4',
-        '.mov': 'video/quicktime',
-        '.ogg': 'audio/ogg',
+        '.aac': 'audio/aac',
         '.flac': 'audio/flac',
-        '.webm': 'audio/webm'
+        '.ogg': 'audio/ogg',
+        '.oga': 'audio/ogg',
+        '.opus': 'audio/opus',
+        '.wma': 'audio/x-ms-wma',
+        '.amr': 'audio/amr',
+        '.aiff': 'audio/aiff',
+        '.aif': 'audio/aiff',
+        '.caf': 'audio/x-caf',
+        '.mka': 'audio/x-matroska',
+        '.wv': 'audio/wavpack',
+        # Video containers
+        '.mp4': 'video/mp4',
+        '.m4v': 'video/x-m4v',
+        '.mov': 'video/quicktime',
+        '.mkv': 'video/x-matroska',
+        '.webm': 'video/webm',
+        '.avi': 'video/x-msvideo',
+        '.mpg': 'video/mpeg',
+        '.mpeg': 'video/mpeg',
+        '.3gp': 'video/3gpp',
+        '.3gpp': 'video/3gpp',
+        '.3g2': 'video/3gpp2',
+        '.ts': 'video/mp2t',
+        '.ogv': 'video/ogg',
+        '.flv': 'video/x-flv',
+        '.wmv': 'video/x-ms-wmv'
     }.get(ext, 'application/octet-stream')
 
 def upload_and_standardize_audio(file_path: str, api_base_url: str = "http://localhost:8000") -> str:
